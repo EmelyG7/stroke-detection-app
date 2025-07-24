@@ -1,0 +1,9 @@
+fastapi==0.103.2
+uvicorn==0.23.2
+motor==3.3.1
+pymongo==4.5.0
+pydantic-settings==2.0.3
+tensorflow==2.18.0
+pillow==10.0.1
+reportlab==4.0.6
+opencv-python
