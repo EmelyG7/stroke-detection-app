@@ -6,7 +6,12 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 from starlette.responses import StreamingResponse
 from app.config import settings
-from app.models.consultation import ConsultationCreate, ConsultationResponse, ImageAnalysisResponse
+from app.models.consultation import (
+    ConsultationCreate,
+    ConsultationResponse,
+    ConsultationListResponse,
+    ImageAnalysisResponse
+)
 from app.utils.pdf import generate_consultation_pdf
 from app.utils.predict import predict_stroke
 from app.utils.validators import validate_object_id
@@ -128,7 +133,8 @@ async def create_consultation(
                 "diagnosis": img["diagnosis"],
                 "confidence": img["confidence"],
                 "probability": img["probability"],
-                "url": f"{settings.API_BASE_URL}/api/images/{img['image_id']}"
+                "url": f"{settings.API_BASE_URL}/api/images/{img['image_id']}",
+                "created_at": img["created_at"].isoformat()
             } for img in image_analyses]
         }
 
@@ -140,73 +146,67 @@ async def create_consultation(
             detail=f"Database error: {str(e)}"
         )
 
-@router.get(
-    "/",
-    response_model=List[ConsultationResponse],
-    summary="List all consultations",
-    description="Returns a list of all consultations with patient information"
-)
+@router.get("/", response_model=List[dict])
 async def get_consultations(limit: int = 100, skip: int = 0):
     try:
         if db.db is None:
             await db.connect()
 
-        pipeline = [
-            {
-                "$lookup": {
-                    "from": "patients",
-                    "localField": "patient_id",
-                    "foreignField": "_id",
-                    "as": "patient"
-                }
-            },
-            {"$unwind": "$patient"},
-            {"$sort": {"created_at": -1}},
-            {"$skip": skip},
-            {"$limit": limit},
-            {
-                "$project": {
-                    "id": {"$toString": "$_id"},
-                    "patient_id": {"$toString": "$patient_id"},
-                    "patient_name": "$patient.name",
-                    "date": {"$dateToString": {"format": "%Y-%m-%d", "date": "$date"}},
-                    "notes": {"$ifNull": ["$notes", ""]},
-                    "diagnosis": {"$ifNull": ["$diagnosis", "Unknown"]},
-                    "probability": {"$ifNull": ["$probability", 0]},
-                    "images": {
-                        "$map": {
-                            "input": {"$ifNull": ["$image_analyses", []]},
-                            "as": "img",
-                            "in": {
-                                "id": {"$toString": "$$img.image_id"},
-                                "filename": "$$img.filename",
-                                "diagnosis": {"$ifNull": ["$$img.diagnosis", "Unknown"]},
-                                "confidence": {"$ifNull": ["$$img.confidence", 0]},
-                                "probability": {"$ifNull": ["$$img.probability", 0]},
-                                "url": f"{settings.API_BASE_URL}/api/images/$$img.image_id"
-                            }
-                        }
-                    }
-                }
+        # First get raw consultations with patient data
+        consultations = await db.db.consultations.find().skip(skip).limit(limit).sort("created_at", -1).to_list(length=None)
+
+        # Process each consultation to ensure proper serialization
+        result = []
+        for consultation in consultations:
+            # Get patient data
+            patient = await db.db.patients.find_one({"_id": consultation["patient_id"]})
+
+            # Process images
+            images = []
+            if "image_analyses" in consultation:
+                for img in consultation["image_analyses"]:
+                    images.append({
+                        "id": str(img["image_id"]),
+                        "filename": img["filename"],
+                        "diagnosis": img.get("diagnosis", "Unknown"),
+                        "confidence": img.get("confidence", 0),
+                        "probability": img.get("probability", 0),
+                        "url": f"{settings.API_BASE_URL}/api/images/{img['image_id']}",
+                        "created_at": img["created_at"].isoformat() if "created_at" in img else None
+                    })
+
+            # Build the consultation response
+            consultation_data = {
+                "id": str(consultation["_id"]),
+                "patient_id": str(consultation["patient_id"]),
+                "patient": {
+                    "id": str(patient["_id"]) if patient else None,
+                    "name": patient.get("name", "") if patient else "",
+                    "age": patient.get("age", 0) if patient else 0,
+                    "gender": patient.get("gender", "") if patient else "",
+                    "smoker": patient.get("smoker", False) if patient else False,
+                    "alcoholic": patient.get("alcoholic", False) if patient else False,
+                    "hypertension": patient.get("hypertension", False) if patient else False,
+                    "diabetes": patient.get("diabetes", False) if patient else False,
+                    "heart_disease": patient.get("heart_disease", False) if patient else False,
+                    "created_at": patient["created_at"].isoformat() if patient and "created_at" in patient else None
+                },
+                "date": consultation["date"].isoformat(),
+                "created_at": consultation["created_at"].isoformat(),
+                "notes": consultation.get("notes", ""),
+                "diagnosis": consultation.get("diagnosis", "Unknown"),
+                "probability": consultation.get("probability", 0),
+                "images": images
             }
-        ]
+            result.append(consultation_data)
 
-        consultations = await db.db.consultations.aggregate(pipeline).to_list(length=None)
+        return result
 
-        return {
-            "success": True,
-            "data": consultations,
-            "message": "Consultations retrieved successfully"
-        }
     except Exception as e:
-        logger.error(f"Error retrieving consultations: {str(e)}")
+        logger.error(f"Error retrieving consultations: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "success": False,
-                "error": str(e),
-                "message": "Failed to retrieve consultations"
-            }
+            detail=f"Error retrieving consultations: {str(e)}"
         )
 
 @router.get(
@@ -216,15 +216,6 @@ async def get_consultations(limit: int = 100, skip: int = 0):
     description="Returns detailed information about a specific consultation"
 )
 async def get_consultation(consultation_id: str):
-    """
-    Obtiene los detalles completos de una consulta médica específica
-
-    Args:
-        consultation_id: ID de la consulta a recuperar
-
-    Returns:
-        ConsultationResponse: Detalles completos de la consulta
-    """
     try:
         validated_id = validate_object_id(consultation_id)
         if db.db is None:
@@ -254,15 +245,15 @@ async def get_consultation(consultation_id: str):
                             "date": "$date"
                         }
                     },
-                    "notes": {"$ifNull": ["$notes", ""]},
-                    "diagnosis": {"$ifNull": ["$diagnosis", "Unknown"]},
-                    "probability": {"$ifNull": ["$probability", 0]},
                     "created_at": {
                         "$dateToString": {
                             "format": "%Y-%m-%dT%H:%M:%SZ",
                             "date": "$created_at"
                         }
                     },
+                    "notes": {"$ifNull": ["$notes", ""]},
+                    "diagnosis": {"$ifNull": ["$diagnosis", "Unknown"]},
+                    "probability": {"$ifNull": ["$probability", 0]},
                     "images": {
                         "$map": {
                             "input": {"$ifNull": ["$image_analyses", []]},
@@ -287,7 +278,7 @@ async def get_consultation(consultation_id: str):
                                         "format": "%Y-%m-%dT%H:%M:%SZ",
                                         "date": "$$img.created_at"
                                     }
-                                }
+                                } if "$$img.created_at" else None
                             }
                         }
                     }
@@ -319,21 +310,11 @@ async def get_consultation(consultation_id: str):
     description="Generates a PDF report for the consultation"
 )
 async def generate_consultation_report(consultation_id: str):
-    """
-    Genera un reporte PDF de la consulta médica
-
-    Args:
-        consultation_id: ID de la consulta para generar el reporte
-
-    Returns:
-        StreamingResponse: PDF del reporte de consulta
-    """
     try:
         validated_id = validate_object_id(consultation_id)
         if db.db is None:
             await db.connect()
 
-        # Obtener datos de la consulta
         consultation = await db.db.consultations.aggregate([
             {"$match": {"_id": validated_id}},
             {
@@ -355,17 +336,14 @@ async def generate_consultation_report(consultation_id: str):
 
         consultation_data = consultation[0]
 
-        # Serializar ObjectIds
         consultation_data["consultation_id"] = str(consultation_data["_id"])
         consultation_data["patient_id"] = str(consultation_data["patient_id"])
         consultation_data["patient"]["_id"] = str(consultation_data["patient"]["_id"])
 
-        # Serializar imágenes si existen
         if "image_analyses" in consultation_data:
             for img in consultation_data["image_analyses"]:
                 img["image_id"] = str(img["image_id"])
 
-        # Generar PDF
         pdf_buffer = generate_consultation_pdf(consultation_data, consultation_data.get("image_analyses", []))
 
         return StreamingResponse(
@@ -389,21 +367,11 @@ async def generate_consultation_report(consultation_id: str):
     description="Deletes a consultation and its associated images"
 )
 async def delete_consultation(consultation_id: str):
-    """
-    Elimina una consulta médica y sus imágenes asociadas
-
-    Args:
-        consultation_id: ID de la consulta a eliminar
-
-    Returns:
-        dict: Mensaje de confirmación
-    """
     try:
         validated_id = validate_object_id(consultation_id)
         if db.db is None:
             await db.connect()
 
-        # Obtener consulta para eliminar imágenes asociadas
         consultation = await db.db.consultations.find_one({"_id": validated_id})
         if not consultation:
             raise HTTPException(
@@ -411,7 +379,6 @@ async def delete_consultation(consultation_id: str):
                 detail="Consultation not found"
             )
 
-        # Eliminar imágenes de GridFS
         fs = await get_gridfs()
         if "image_analyses" in consultation:
             for image in consultation["image_analyses"]:
@@ -420,7 +387,6 @@ async def delete_consultation(consultation_id: str):
                 except Exception as e:
                     logger.error(f"Error deleting image {image['image_id']}: {str(e)}")
 
-        # Eliminar la consulta
         result = await db.db.consultations.delete_one({"_id": validated_id})
 
         if result.deleted_count == 0:

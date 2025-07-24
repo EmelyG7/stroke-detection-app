@@ -33,3 +33,8 @@ class ConsultationResponse(ConsultationBase):
     patient_name: Optional[str] = Field(default=None, description="Name of the patient")
     created_at: datetime = Field(..., description="Creation timestamp")
     images: List[ImageAnalysisResponse] = Field(default_factory=list, description="List of image analyses")
+
+class ConsultationListResponse(BaseModel):
+    success: bool = Field(True, description="Indicates if the request was successful")
+    data: List[ConsultationResponse] = Field(..., description="List of consultations")
+    message: Optional[str] = Field(None, description="Optional message")
