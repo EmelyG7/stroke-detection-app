@@ -23,17 +23,35 @@ app = FastAPI(
     redirect_slashes=True
 )
 
-# Configure CORS
+# IMPROVED CORS Configuration - This is the key fix!
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Especifica tu frontend exacto
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"]  # Añade esto
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Origin",
+        "DNT",
+        "User-Agent",
+        "If-Modified-Since",
+        "Cache-Control",
+        "Range"
+    ],
+    expose_headers=["*"]
 )
 
-# Import and include routers AFTER app creation
+# Import and include routers AFTER app creation and CORS setup
 from app.routes.dashboard import router as dashboard_router
 from app.routes.patients import router as patients_router
 from app.routes.consultations import router as consultations_router
@@ -45,6 +63,11 @@ app.include_router(patients_router, prefix="/api/patients")
 app.include_router(consultations_router, prefix="/api/consultations")
 app.include_router(images_router, prefix="/api/images")
 app.include_router(users_router, prefix="/api/users")
+
+# Add a simple test endpoint to verify CORS is working
+@app.get("/api/test")
+async def test_cors():
+    return {"message": "CORS is working!", "status": "success"}
 
 @app.on_event("startup")
 async def startup():
@@ -74,8 +97,14 @@ async def shutdown():
 async def root():
     return {"message": "Stroke Detection API"}
 
-for route in app.routes:
-    print(f"{route.path} -> {route.name}")
+# Debug: Print all registered routes
+@app.on_event("startup")
+async def print_routes():
+    logger.info("Registered routes:")
+    for route in app.routes:
+        if hasattr(route, 'path') and hasattr(route, 'methods'):
+            methods = getattr(route, 'methods', set())
+            logger.info(f"  {', '.join(methods)} {route.path}")
 
 if __name__ == "__main__":
     import uvicorn

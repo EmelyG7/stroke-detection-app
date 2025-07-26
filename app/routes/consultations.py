@@ -1,7 +1,7 @@
 import io
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 from starlette.responses import StreamingResponse
@@ -18,9 +18,7 @@ from app.utils.validators import validate_object_id
 from app.db import db
 import logging
 from fastapi.encoders import jsonable_encoder
-# Script de debug para verificar dónde están las imágenes
-from bson import ObjectId
-import asyncio
+
 router = APIRouter(
     prefix="",
     tags=["consultations"],
@@ -42,122 +40,249 @@ async def get_gridfs():
     description="Creates a new consultation with image analysis for stroke detection"
 )
 async def create_consultation(
-        patient_id: str,
-        date: str,
-        notes: Optional[str] = None,
-        images: List[UploadFile] = File(...),
+        patient_id: str = Form(..., description="Patient ID"),
+        date: str = Form(..., description="Consultation date in YYYY-MM-DD format"),
+        notes: Optional[str] = Form(None, description="Optional consultation notes"),
+        images: List[UploadFile] = File(..., description="DWI images for analysis"),
 ):
-    if not images:
+    """
+    Create a new consultation with image analysis.
+
+    - **patient_id**: The ID of the patient
+    - **date**: Date of consultation in YYYY-MM-DD format
+    - **notes**: Optional medical notes
+    - **images**: List of DWI images for stroke detection
+    """
+
+    # Log received data for debugging
+    logger.info(f"Creating consultation - Patient ID: {patient_id}, Date: {date}, Images: {len(images)}")
+
+    # Validate inputs
+    if not patient_id or not patient_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Patient ID is required"
+        )
+
+    if not date or not date.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Date is required"
+        )
+
+    if not images or len(images) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one image is required"
         )
+
+    # Validate image files
+    for image in images:
+        if not image.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="All uploaded files must have filenames"
+            )
+
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File {image.filename} is not a valid image"
+            )
+
     try:
-        validated_patient_id = validate_object_id(patient_id)
-        consultation_date = datetime.fromisoformat(date)
+        # Validate patient ID format
+        validated_patient_id = validate_object_id(patient_id.strip())
+
+        # Validate date format
+        consultation_date = datetime.fromisoformat(date.strip())
+
+        # Check if patient exists
+        patient = await db.db.patients.find_one({"_id": validated_patient_id})
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+
     except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail=f"Invalid input: {str(e)}"
+        )
+
+    # Create consultation document first to get consultation_id
+    consultation_data = {
+        "patient_id": validated_patient_id,
+        "date": consultation_date,
+        "notes": notes.strip() if notes and notes.strip() else None,
+        "diagnosis": "Processing...",  # Temporary value
+        "probability": 0.0,  # Temporary value
+        "created_at": datetime.utcnow(),
+        "image_analyses": []  # Will be populated below
+    }
+
+    try:
+        # Insert consultation to get ID
+        result = await db.db.consultations.insert_one(consultation_data)
+        consultation_id = result.inserted_id
+        logger.info(f"Created consultation {consultation_id}")
+
+    except Exception as e:
+        logger.error(f"Database error creating consultation: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
         )
 
     image_analyses = []
     probabilities = []
     fs = await get_gridfs()
 
-    for image in images:
-        if not image.content_type.startswith("image/"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"File {image.filename} is not an image"
-            )
+    # Process each image
+    for idx, image in enumerate(images):
         try:
+            logger.info(f"Processing image {idx + 1}/{len(images)}: {image.filename}")
+
+            # Read image content
             content = await image.read()
+
+            if len(content) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Image {image.filename} is empty"
+                )
+
+            # Check file size (10MB limit)
+            if len(content) > 10 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Image {image.filename} is too large (max 10MB)"
+                )
+
+            # Predict stroke
             prediction = await predict_stroke(content)
 
-            # Upload to GridFS with proper stream handling
+            # Upload to GridFS
             gridfs_file = await fs.upload_from_stream(
                 filename=image.filename,
-                source=io.BytesIO(content),  # Use BytesIO for proper stream handling
+                source=io.BytesIO(content),
                 metadata={
                     "content_type": image.content_type,
-                    "uploaded_at": datetime.utcnow()
+                    "uploaded_at": datetime.utcnow(),
+                    "size": len(content),
+                    "consultation_id": str(consultation_id)  # Add consultation reference
                 }
             )
 
+            # Create image analysis record - with required fields for Pydantic model
             image_analysis = {
                 "image_id": str(gridfs_file),
+                "consultation_id": str(consultation_id),  # Required by Pydantic model
                 "filename": image.filename,
                 "diagnosis": prediction["diagnosis"],
                 "confidence": prediction["confidence"],
                 "probability": prediction["probability"],
                 "created_at": datetime.utcnow()
             }
+
             image_analyses.append(image_analysis)
             probabilities.append(prediction["probability"])
 
+            logger.info(f"Successfully processed image {image.filename}")
+
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is
+            await db.db.consultations.delete_one({"_id": consultation_id})
+            raise
         except Exception as e:
-            logger.error(f"Error processing image {image.filename}: {str(e)}")
+            logger.error(f"Error processing image {image.filename}: {str(e)}", exc_info=True)
+            # Clean up consultation if image processing fails
+            await db.db.consultations.delete_one({"_id": consultation_id})
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error processing image {image.filename}: {str(e)}"
             )
 
+    # Calculate final diagnosis
     avg_probability = sum(probabilities) / len(probabilities) if probabilities else 0
     final_diagnosis = "Stroke" if avg_probability >= 0.5 else "Normal"
 
-    consultation_data = {
-        "patient_id": validated_patient_id,
-        "date": consultation_date,
-        "notes": notes,
-        "diagnosis": final_diagnosis,
-        "probability": avg_probability,
-        "created_at": datetime.utcnow(),
-        "image_analyses": image_analyses  # Store images in consultation document
-    }
+    logger.info(f"Final diagnosis: {final_diagnosis} (probability: {avg_probability})")
 
+    # Update consultation with final results
     try:
-        result = await db.db.consultations.insert_one(consultation_data)
-        created = await db.db.consultations.find_one({"_id": result.inserted_id})
+        update_result = await db.db.consultations.update_one(
+            {"_id": consultation_id},
+            {
+                "$set": {
+                    "diagnosis": final_diagnosis,
+                    "probability": avg_probability,
+                    "image_analyses": image_analyses
+                }
+            }
+        )
 
-        # Get patient info
-        patient = await db.db.patients.find_one({"_id": validated_patient_id})
+        if update_result.modified_count == 0:
+            logger.error("Failed to update consultation with results")
+            await db.db.consultations.delete_one({"_id": consultation_id})
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update consultation with results"
+            )
 
-        # Build response
-        response = {
-            "id": str(result.inserted_id),
-            "patient_id": str(validated_patient_id),
-            "patient_name": patient.get("name", "") if patient else "",
-            "date": consultation_date.isoformat(),
-            "notes": notes,
-            "diagnosis": final_diagnosis,
-            "probability": avg_probability,
-            "created_at": consultation_data["created_at"].isoformat(),
-            "images": [{
-                "id": img["image_id"],
+        # Build response with proper structure matching Pydantic models
+        response_images = []
+        for img in image_analyses:
+            response_images.append({
+                "id": img["image_id"],  # This becomes the id field
+                "image_id": img["image_id"],  # Required by model
+                "consultation_id": img["consultation_id"],  # Required by model
                 "filename": img["filename"],
                 "diagnosis": img["diagnosis"],
                 "confidence": img["confidence"],
                 "probability": img["probability"],
                 "url": f"{settings.API_BASE_URL}/api/images/{img['image_id']}",
-                "created_at": img["created_at"].isoformat()
-            } for img in image_analyses]
-        }
+                "created_at": img["created_at"]
+            })
 
-        return jsonable_encoder(response)
+        response = ConsultationResponse(
+            id=str(consultation_id),
+            patient_id=str(validated_patient_id),
+            patient_name=patient.get("name", ""),
+            date=consultation_date.isoformat(),
+            notes=consultation_data["notes"],
+            diagnosis=final_diagnosis,
+            probability=avg_probability,
+            created_at=consultation_data["created_at"],
+            images=response_images
+        )
+
+        return response
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        logger.error(f"Database error: {str(e)}")
+        logger.error(f"Database error updating consultation: {str(e)}", exc_info=True)
+        # Clean up consultation if update fails
+        await db.db.consultations.delete_one({"_id": consultation_id})
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error: {str(e)}"
         )
+
 @router.get("/", response_model=List[dict])
 async def get_consultations(limit: int = 100, skip: int = 0):
+    """
+    Get all consultations with patient information and images
+    """
     try:
         if db.db is None:
             await db.connect()
 
-        # First get raw consultations with patient data
+        # Get consultations with patient data
         consultations = await db.db.consultations.find().skip(skip).limit(limit).sort("created_at", -1).to_list(length=None)
 
         # Process each consultation to ensure proper serialization
@@ -166,12 +291,14 @@ async def get_consultations(limit: int = 100, skip: int = 0):
             # Get patient data
             patient = await db.db.patients.find_one({"_id": consultation["patient_id"]})
 
-            # Process images
+            # Process images with proper structure
             images = []
             if "image_analyses" in consultation:
                 for img in consultation["image_analyses"]:
                     images.append({
                         "id": str(img["image_id"]),
+                        "image_id": str(img["image_id"]),  # Required field
+                        "consultation_id": str(consultation["_id"]),  # Required field
                         "filename": img["filename"],
                         "diagnosis": img.get("diagnosis", "Unknown"),
                         "confidence": img.get("confidence", 0),
@@ -214,37 +341,40 @@ async def get_consultations(limit: int = 100, skip: int = 0):
             detail=f"Error retrieving consultations: {str(e)}"
         )
 
-# En tu archivo de rutas de consultas (consultations.py)
-
 @router.get("/{consultation_id}", response_model=ConsultationResponse)
 async def get_consultation(consultation_id: str):
+    """
+    Get a specific consultation by ID
+    """
     try:
         validated_id = validate_object_id(consultation_id)
 
-        # Obtener la consulta principal
+        # Get the consultation
         consultation = await db.db.consultations.find_one({"_id": validated_id})
         if not consultation:
             raise HTTPException(status_code=404, detail="Consultation not found")
 
-        # Obtener información del paciente
+        # Get patient information
         patient = await db.db.patients.find_one({"_id": consultation["patient_id"]})
 
         processed_images = []
         fs = AsyncIOMotorGridFSBucket(db.db)
 
-        # OPCIÓN 1: Verificar si las imágenes están en el documento de consulta
+        # Check if images are in the consultation document
         if "image_analyses" in consultation and consultation["image_analyses"]:
             logger.info(f"Found {len(consultation['image_analyses'])} images in consultation document")
 
             for img in consultation["image_analyses"]:
                 try:
-                    # En el documento de consulta, image_id ES el ID de GridFS
+                    # In consultation document, image_id IS the GridFS ID
                     gridfs_id = ObjectId(img["image_id"]) if isinstance(img["image_id"], str) else img["image_id"]
                     await fs.open_download_stream(gridfs_id)
-                    image_url = f"/api/images/{img['image_id']}"
+                    image_url = f"{settings.API_BASE_URL}/api/images/{img['image_id']}"
 
                     processed_images.append({
-                        "id": str(img["image_id"]),  # ID de GridFS
+                        "id": str(img["image_id"]),  # GridFS ID
+                        "image_id": str(img["image_id"]),  # Required field
+                        "consultation_id": str(consultation["_id"]),  # Required field
                         "filename": img.get("filename", f"image_{str(img['image_id'])[:6]}.jpg"),
                         "diagnosis": img.get("diagnosis", "Unknown"),
                         "confidence": img.get("confidence", 0),
@@ -256,7 +386,7 @@ async def get_consultation(consultation_id: str):
                 except Exception as e:
                     logger.warning(f"Image {img['image_id']} not accessible: {str(e)}")
 
-        # OPCIÓN 2: Si no hay imágenes en el documento, buscar en la colección separada
+        # If no images in document, check separate collection (fallback)
         else:
             logger.info("No images in consultation document, checking separate collection")
             separate_images = await db.db.image_analyses.find({"consultation_id": validated_id}).to_list(100)
@@ -264,15 +394,9 @@ async def get_consultation(consultation_id: str):
 
             for img in separate_images:
                 try:
-                    # IMPORTANTE: En la colección separada, necesitamos usar el campo correcto para GridFS
-                    # Vamos a verificar qué campos tiene el documento
-                    logger.info(f"Image document keys: {list(img.keys())}")
-
-                    # El ID real de GridFS debería estar en img["image_id"]
-                    # Pero necesitamos verificar si es un ObjectId válido
                     gridfs_id = None
 
-                    # Intentar diferentes campos posibles
+                    # Try different possible fields
                     if "image_id" in img:
                         try:
                             gridfs_id = ObjectId(img["image_id"]) if isinstance(img["image_id"], str) else img["image_id"]
@@ -282,7 +406,7 @@ async def get_consultation(consultation_id: str):
                             logger.warning(f"❌ image_id {img['image_id']} not found in GridFS: {str(e)}")
                             gridfs_id = None
 
-                    # Si image_id no funciona, tal vez el ID de GridFS esté en otro campo
+                    # If image_id doesn't work, maybe GridFS ID is in another field
                     if gridfs_id is None and "gridfs_id" in img:
                         try:
                             gridfs_id = ObjectId(img["gridfs_id"]) if isinstance(img["gridfs_id"], str) else img["gridfs_id"]
@@ -293,28 +417,27 @@ async def get_consultation(consultation_id: str):
 
                     if gridfs_id:
                         processed_images.append({
-                            "id": str(gridfs_id),  # CORREGIDO: Usar GridFS ID como ID principal
+                            "id": str(gridfs_id),
                             "consultation_id": str(img["consultation_id"]),
-                            "image_id": str(gridfs_id),  # ID real de GridFS
+                            "image_id": str(gridfs_id),  # Required field
                             "filename": img.get("filename", f"image_{str(gridfs_id)[:6]}.jpg"),
                             "diagnosis": img.get("diagnosis", "Unknown"),
                             "confidence": img.get("confidence", 0),
                             "probability": img.get("probability", 0),
-                            "url": f"/api/images/{gridfs_id}",  # Usar el ID correcto de GridFS
+                            "url": f"{settings.API_BASE_URL}/api/images/{gridfs_id}",
                             "created_at": img.get("created_at", datetime.utcnow()).isoformat()
                         })
                     else:
                         logger.error(f"Could not find GridFS file for image document {img['_id']}")
-                        # Agregar sin URL para mostrar que existe pero no está disponible
                         processed_images.append({
-                            "id": str(img.get("image_id", img["_id"])),  # CORREGIDO: Usar image_id si existe
+                            "id": str(img.get("image_id", img["_id"])),
                             "consultation_id": str(img["consultation_id"]),
-                            "image_id": str(img.get("image_id", "")),
+                            "image_id": str(img.get("image_id", "")),  # Required field
                             "filename": img.get("filename", f"image_{str(img['_id'])[:6]}.jpg"),
                             "diagnosis": img.get("diagnosis", "Unknown"),
                             "confidence": img.get("confidence", 0),
                             "probability": img.get("probability", 0),
-                            "url": None,  # Sin URL porque no se encontró en GridFS
+                            "url": None,
                             "created_at": img.get("created_at", datetime.utcnow()).isoformat()
                         })
 
@@ -323,24 +446,99 @@ async def get_consultation(consultation_id: str):
 
         logger.info(f"Successfully processed {len(processed_images)} images for consultation {consultation_id}")
 
-        return {
-            "id": str(consultation["_id"]),
-            "patient_id": str(consultation["patient_id"]),
-            "patient_name": patient.get("name", "") if patient else "Unknown",
-            "date": consultation.get("date", datetime.utcnow()).isoformat(),
-            "notes": consultation.get("notes", ""),
-            "diagnosis": consultation.get("diagnosis", "Unknown"),
-            "probability": consultation.get("probability", 0),
-            "created_at": consultation.get("created_at", datetime.utcnow()).isoformat(),
-            "images": processed_images
-        }
+        return ConsultationResponse(
+            id=str(consultation["_id"]),
+            patient_id=str(consultation["patient_id"]),
+            patient_name=patient.get("name", "") if patient else "Unknown",
+            date=consultation.get("date", datetime.utcnow()).isoformat(),
+            notes=consultation.get("notes", ""),
+            diagnosis=consultation.get("diagnosis", "Unknown"),
+            probability=consultation.get("probability", 0),
+            created_at=consultation.get("created_at", datetime.utcnow()),
+            images=processed_images
+        )
 
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         logger.error(f"Error retrieving consultation {consultation_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error retrieving consultation: {str(e)}")
 
+@router.put("/{consultation_id}")
+async def update_consultation(
+        consultation_id: str,
+        patient_id: str = Form(..., description="Patient ID"),
+        date: str = Form(..., description="Consultation date in YYYY-MM-DD format"),
+        notes: Optional[str] = Form(None, description="Optional consultation notes"),
+):
+    """
+    Update an existing consultation (images cannot be updated)
+    """
+    try:
+        validated_id = validate_object_id(consultation_id)
+        validated_patient_id = validate_object_id(patient_id.strip())
+        consultation_date = datetime.fromisoformat(date.strip())
+
+        # Check if consultation exists
+        consultation = await db.db.consultations.find_one({"_id": validated_id})
+        if not consultation:
+            raise HTTPException(status_code=404, detail="Consultation not found")
+
+        # Check if patient exists
+        patient = await db.db.patients.find_one({"_id": validated_patient_id})
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
+
+        # Update consultation
+        update_data = {
+            "patient_id": validated_patient_id,
+            "date": consultation_date,
+            "notes": notes.strip() if notes and notes.strip() else None,
+            "updated_at": datetime.utcnow()
+        }
+
+        result = await db.db.consultations.update_one(
+            {"_id": validated_id},
+            {"$set": update_data}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Consultation not found or no changes made")
+
+        # Get updated consultation
+        updated_consultation = await db.db.consultations.find_one({"_id": validated_id})
+
+        return {
+            "success": True,
+            "message": "Consultation updated successfully",
+            "data": {
+                "id": str(updated_consultation["_id"]),
+                "patient_id": str(updated_consultation["patient_id"]),
+                "patient_name": patient.get("name", ""),
+                "date": updated_consultation["date"].isoformat(),
+                "notes": updated_consultation.get("notes", ""),
+                "diagnosis": updated_consultation.get("diagnosis", "Unknown"),
+                "probability": updated_consultation.get("probability", 0),
+                "created_at": updated_consultation.get("created_at", datetime.utcnow()).isoformat(),
+                "updated_at": updated_consultation.get("updated_at", datetime.utcnow()).isoformat()
+            }
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid input: {str(e)}")
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error updating consultation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating consultation: {str(e)}")
+
 @router.get("/{consultation_id}/report", response_class=StreamingResponse)
 async def generate_consultation_report(consultation_id: str):
+    """
+    Generate a PDF report for a consultation
+    """
     try:
         validated_id = validate_object_id(consultation_id)
 
@@ -386,6 +584,9 @@ async def generate_consultation_report(consultation_id: str):
             }
         )
 
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         logger.error(f"Error generating report: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -400,6 +601,9 @@ async def generate_consultation_report(consultation_id: str):
     description="Deletes a consultation and its associated images"
 )
 async def delete_consultation(consultation_id: str):
+    """
+    Delete a consultation and its associated images
+    """
     try:
         validated_id = validate_object_id(consultation_id)
         if db.db is None:
@@ -413,13 +617,17 @@ async def delete_consultation(consultation_id: str):
             )
 
         fs = await get_gridfs()
+
+        # Delete associated images from GridFS
         if "image_analyses" in consultation:
             for image in consultation["image_analyses"]:
                 try:
                     await fs.delete(ObjectId(image["image_id"]))
+                    logger.info(f"Deleted image {image['image_id']} from GridFS")
                 except Exception as e:
                     logger.error(f"Error deleting image {image['image_id']}: {str(e)}")
 
+        # Delete the consultation document
         result = await db.db.consultations.delete_one({"_id": validated_id})
 
         if result.deleted_count == 0:
@@ -430,6 +638,9 @@ async def delete_consultation(consultation_id: str):
 
         return {"success": True, "message": "Consultation deleted successfully"}
 
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         logger.error(f"Error deleting consultation: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -437,82 +648,14 @@ async def delete_consultation(consultation_id: str):
             detail=f"Error deleting consultation: {str(e)}"
         )
 
-async def debug_consultation_images(consultation_id: str):
-    """Debug function to check where images are stored"""
-
-    validated_id = ObjectId(consultation_id)
-
-    print(f"=== DEBUGGING CONSULTATION {consultation_id} ===")
-
-    # 1. Verificar el documento de consulta
-    consultation = await db.db.consultations.find_one({"_id": validated_id})
-    if consultation:
-        print("✅ Consultation found in database")
-        print(f"Keys in consultation: {list(consultation.keys())}")
-
-        if "image_analyses" in consultation:
-            print(f"✅ image_analyses found in consultation document")
-            print(f"Number of images: {len(consultation['image_analyses'])}")
-            for i, img in enumerate(consultation['image_analyses']):
-                print(f"  Image {i}: {img}")
-        else:
-            print("❌ No image_analyses in consultation document")
-    else:
-        print("❌ Consultation not found")
-        return
-
-    # 2. Verificar la colección image_analyses separada
-    separate_images = await db.db.image_analyses.find({"consultation_id": validated_id}).to_list(100)
-    if separate_images:
-        print(f"✅ Found {len(separate_images)} images in separate image_analyses collection")
-        for i, img in enumerate(separate_images):
-            print(f"  Separate Image {i}: {img}")
-    else:
-        print("❌ No images found in separate image_analyses collection")
-
-    # 3. Verificar GridFS
-    fs = AsyncIOMotorGridFSBucket(db.db)
-    gridfs_files = []
-    async for file_info in fs.find():
-        gridfs_files.append({
-            "id": str(file_info._id),
-            "filename": file_info.filename,
-            "metadata": file_info.metadata
-        })
-
-    print(f"GridFS files found: {len(gridfs_files)}")
-    for file_info in gridfs_files:
-        print(f"  GridFS file: {file_info}")
-
-    # 4. Verificar si las imágenes de la consulta existen en GridFS
-    if "image_analyses" in consultation:
-        for img in consultation["image_analyses"]:
-            image_id = img["image_id"]
-            try:
-                grid_out = await fs.open_download_stream(ObjectId(image_id))
-                print(f"✅ Image {image_id} exists in GridFS")
-            except Exception as e:
-                print(f"❌ Image {image_id} NOT found in GridFS: {str(e)}")
-
-# Función para usar en el endpoint
+# Debug endpoints (remove in production)
 @router.get("/{consultation_id}/debug")
 async def debug_consultation(consultation_id: str):
     """Debug endpoint to check consultation images"""
     try:
-        await debug_consultation_images(consultation_id)
-        return {"message": "Check server logs for debug information"}
-    except Exception as e:
-        logger.error(f"Debug error: {str(e)}")
-        return {"error": str(e)}
-
-# Agregar este endpoint temporal para debug
-@router.get("/{consultation_id}/debug-images")
-async def debug_images(consultation_id: str):
-    """Endpoint temporal para debuggear imágenes"""
-    try:
         validated_id = validate_object_id(consultation_id)
 
-        # 1. Obtener consulta
+        # 1. Get consultation
         consultation = await db.db.consultations.find_one({"_id": validated_id})
         if not consultation:
             return {"error": "Consultation not found"}
@@ -526,12 +669,12 @@ async def debug_images(consultation_id: str):
             "gridfs_files": []
         }
 
-        # 2. Verificar imágenes en documento
+        # 2. Check images in document
         if "image_analyses" in consultation:
             result["image_analyses_in_doc"] = consultation["image_analyses"]
             result["image_count_in_doc"] = len(consultation["image_analyses"])
 
-        # 3. Verificar colección separada
+        # 3. Check separate collection
         separate_images = await db.db.image_analyses.find({"consultation_id": validated_id}).to_list(100)
         result["separate_image_analyses"] = [
             {
@@ -543,7 +686,7 @@ async def debug_images(consultation_id: str):
         ]
         result["separate_image_count"] = len(separate_images)
 
-        # 4. Verificar GridFS
+        # 4. Check GridFS
         fs = AsyncIOMotorGridFSBucket(db.db)
         gridfs_files = []
         async for file_info in fs.find():
@@ -560,53 +703,4 @@ async def debug_images(consultation_id: str):
 
     except Exception as e:
         logger.error(f"Debug error: {str(e)}")
-        return {"error": str(e)}
-
-# Agrega este endpoint temporal para ver la estructura exacta
-@router.get("/{consultation_id}/debug-structure")
-async def debug_image_structure(consultation_id: str):
-    """Debug endpoint para ver la estructura exacta de las imágenes"""
-    try:
-        validated_id = validate_object_id(consultation_id)
-
-        # 1. Obtener consulta
-        consultation = await db.db.consultations.find_one({"_id": validated_id})
-        if not consultation:
-            return {"error": "Consultation not found"}
-
-        # 2. Obtener imágenes de la colección separada
-        separate_images = await db.db.image_analyses.find({"consultation_id": validated_id}).to_list(100)
-
-        # 3. Obtener todos los archivos de GridFS para comparar
-        fs = AsyncIOMotorGridFSBucket(db.db)
-        gridfs_files = []
-        async for file_info in fs.find():
-            gridfs_files.append({
-                "gridfs_id": str(file_info._id),
-                "filename": file_info.filename,
-                "length": file_info.length,
-                "metadata": file_info.metadata
-            })
-
-        return {
-            "consultation_id": consultation_id,
-            "consultation_has_images": "image_analyses" in consultation,
-            "consultation_images": consultation.get("image_analyses", []),
-            "separate_images_count": len(separate_images),
-            "separate_images": [
-                {
-                    "document_id": str(img["_id"]),
-                    "image_id": str(img.get("image_id", "NO_IMAGE_ID")),
-                    "filename": img.get("filename", "NO_FILENAME"),
-                    "consultation_id": str(img.get("consultation_id", "NO_CONSULTATION_ID")),
-                    "all_keys": list(img.keys()),
-                    "full_document": img  # Para ver todo el documento
-                } for img in separate_images
-            ],
-            "gridfs_files_count": len(gridfs_files),
-            "gridfs_files": gridfs_files
-        }
-
-    except Exception as e:
-        logger.error(f"Debug structure error: {str(e)}")
         return {"error": str(e)}
