@@ -12,7 +12,7 @@ from app.models.consultation import (
     ConsultationListResponse,
     ImageAnalysisResponse
 )
-from app.utils.pdf import generate_consultation_pdf
+from app.utils.pdf import generate_clinical_pdf_report
 from app.utils.predict import predict_stroke
 from app.utils.validators import validate_object_id
 from app.db import db
@@ -574,7 +574,7 @@ async def generate_consultation_report(consultation_id: str):
                 image_analyses.append(img)
 
         # Generate PDF
-        pdf_buffer = generate_consultation_pdf(consultation_data, image_analyses)
+        pdf_buffer = generate_clinical_pdf_report(consultation_data, image_analyses)
 
         return StreamingResponse(
             io.BytesIO(pdf_buffer),
