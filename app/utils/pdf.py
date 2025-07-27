@@ -16,131 +16,288 @@ from reportlab.platypus import (
     Spacer,
     Table,
     TableStyle,
-    Image as PlatypusImage
+    Image as PlatypusImage,
+    PageBreak,
+    KeepTogether
 )
 
 logger = logging.getLogger(__name__)
 
-# Register professional medical fonts
-try:
-    pdfmetrics.registerFont(TTFont('Helvetica', 'Helvetica.ttf'))
-    pdfmetrics.registerFont(TTFont('Helvetica-Bold', 'Helvetica-Bold.ttf'))
-except:
-    logger.warning("Professional fonts not found, falling back to defaults")
+# Register professional fonts with fallbacks
+def register_professional_fonts():
+    """Register professional fonts with system fallbacks"""
+    font_registered = False
+
+    # Try to register Times New Roman variants
+    times_fonts = [
+        ('Times-Roman', ['times.ttf', 'Times New Roman.ttf', 'TimesNewRoman.ttf']),
+        ('Times-Bold', ['timesbd.ttf', 'Times New Roman Bold.ttf', 'TimesNewRoman-Bold.ttf']),
+        ('Times-Italic', ['timesi.ttf', 'Times New Roman Italic.ttf', 'TimesNewRoman-Italic.ttf']),
+        ('Times-BoldItalic', ['timesbi.ttf', 'Times New Roman Bold Italic.ttf', 'TimesNewRoman-BoldItalic.ttf'])
+    ]
+
+    for font_name, file_options in times_fonts:
+        for font_file in file_options:
+            try:
+                pdfmetrics.registerFont(TTFont(font_name, font_file))
+                font_registered = True
+                logger.info(f"Successfully registered {font_name} from {font_file}")
+                break
+            except:
+                continue
+
+    # Try alternative professional fonts if Times is not available
+    if not font_registered:
+        alternative_fonts = [
+            ('Professional-Roman', ['arial.ttf', 'Arial.ttf', 'calibri.ttf', 'Calibri.ttf']),
+            ('Professional-Bold', ['arialbd.ttf', 'Arial Bold.ttf', 'calibrib.ttf', 'Calibri-Bold.ttf']),
+        ]
+
+        for font_name, file_options in alternative_fonts:
+            for font_file in file_options:
+                try:
+                    pdfmetrics.registerFont(TTFont(font_name, font_file))
+                    font_registered = True
+                    logger.info(f"Successfully registered {font_name} from {font_file}")
+                    break
+                except:
+                    continue
+            if font_registered:
+                break
+
+    if not font_registered:
+        logger.warning("No custom fonts registered, using ReportLab defaults")
+
+    return font_registered
+
+def get_font_family():
+    """Get the appropriate font family based on what's available"""
+    try:
+        # Check if Times New Roman is available
+        pdfmetrics.getFont('Times-Roman')
+        return {
+            'normal': 'Times-Roman',
+            'bold': 'Times-Bold',
+            'italic': 'Times-Italic',
+            'bold_italic': 'Times-BoldItalic'
+        }
+    except:
+        try:
+            # Check if professional alternative is available
+            pdfmetrics.getFont('Professional-Roman')
+            return {
+                'normal': 'Professional-Roman',
+                'bold': 'Professional-Bold',
+                'italic': 'Professional-Roman',
+                'bold_italic': 'Professional-Bold'
+            }
+        except:
+            # Fall back to ReportLab defaults
+            return {
+                'normal': 'Helvetica',
+                'bold': 'Helvetica-Bold',
+                'italic': 'Helvetica-Oblique',
+                'bold_italic': 'Helvetica-BoldOblique'
+            }
 
 def create_clinical_styles():
-    """Create styles for medical professional documentation"""
+    """Create professional medical document styles with proper typography"""
+
+    # Register fonts first
+    register_professional_fonts()
+    fonts = get_font_family()
+
+    # Professional color palette for medical documents
+    colors_palette = {
+        'primary_blue': colors.HexColor('#1B4B73'),      # Deep medical blue
+        'secondary_blue': colors.HexColor('#2E5984'),     # Medium blue
+        'accent_blue': colors.HexColor('#E8F1F8'),        # Light blue background
+        'critical_red': colors.HexColor('#B91C1C'),       # Medical red for critical findings
+        'normal_green': colors.HexColor('#166534'),       # Medical green for normal findings
+        'warning_orange': colors.HexColor('#C2410C'),     # Warning orange
+        'text_dark': colors.HexColor('#1F2937'),          # Dark gray for text
+        'text_medium': colors.HexColor('#4B5563'),        # Medium gray
+        'text_light': colors.HexColor('#6B7280'),         # Light gray
+        'border_color': colors.HexColor('#D1D5DB'),       # Light border
+    }
+
     return {
-        'Title': ParagraphStyle(
-            name='ClinicalTitle',
+        'InstitutionTitle': ParagraphStyle(
+            name='InstitutionTitle',
+            fontSize=20,
+            leading=25,
+            alignment=TA_CENTER,
+            spaceAfter=8,
+            fontName=fonts['bold'],
+            textColor=colors_palette['primary_blue']
+        ),
+        'ReportTitle': ParagraphStyle(
+            name='ReportTitle',
             fontSize=16,
             leading=20,
             alignment=TA_CENTER,
-            spaceAfter=20,
-            fontName='Helvetica-Bold',
-            textColor=colors.HexColor('#003366')  # Dark blue for professional look
+            spaceAfter=6,
+            fontName=fonts['bold'],
+            textColor=colors_palette['secondary_blue']
         ),
-        'Header': ParagraphStyle(
-            name='ClinicalHeader',
+        'ReportSubtitle': ParagraphStyle(
+            name='ReportSubtitle',
+            fontSize=12,
+            leading=15,
+            alignment=TA_CENTER,
+            spaceAfter=25,
+            fontName=fonts['italic'],
+            textColor=colors_palette['text_medium']
+        ),
+        'SectionHeader': ParagraphStyle(
+            name='SectionHeader',
             fontSize=14,
             leading=18,
             alignment=TA_LEFT,
             spaceAfter=12,
-            fontName='Helvetica-Bold',
-            textColor=colors.HexColor('#003366'),
-            leftIndent=0
+            spaceBefore=20,
+            fontName=fonts['bold'],
+            textColor=colors_palette['secondary_blue'],
+            borderWidth=1,
+            borderColor=colors_palette['border_color'],
+            borderPadding=8,
+            backColor=colors_palette['accent_blue']
         ),
-        'Subheader': ParagraphStyle(
-            name='ClinicalSubheader',
+        'SubsectionHeader': ParagraphStyle(
+            name='SubsectionHeader',
             fontSize=12,
             leading=16,
             alignment=TA_LEFT,
             spaceAfter=8,
-            fontName='Helvetica-Bold',
-            textColor=colors.HexColor('#333333')
+            spaceBefore=12,
+            fontName=fonts['bold'],
+            textColor=colors_palette['text_dark']
         ),
-        'ClinicalText': ParagraphStyle(
-            name='ClinicalText',
+        'BodyText': ParagraphStyle(
+            name='BodyText',
             fontSize=11,
-            leading=14,
+            leading=15,
             alignment=TA_JUSTIFY,
-            fontName='Helvetica',
-            textColor=colors.black,
-            spaceAfter=10
+            fontName=fonts['normal'],
+            textColor=colors_palette['text_dark'],
+            spaceAfter=10,
+            firstLineIndent=12
         ),
         'CriticalFinding': ParagraphStyle(
             name='CriticalFinding',
             fontSize=12,
-            leading=15,
+            leading=16,
             alignment=TA_LEFT,
-            fontName='Helvetica-Bold',
-            textColor=colors.HexColor('#990000'),  # Dark red for critical findings
-            backColor=colors.HexColor('#FFEEEE'),
-            borderPadding=5,
+            fontName=fonts['bold'],
+            textColor=colors_palette['critical_red'],
+            backColor=colors.HexColor('#FEF2F2'),
+            borderColor=colors_palette['critical_red'],
+            borderWidth=1,
+            borderPadding=10,
+            spaceBefore=12,
             spaceAfter=12
         ),
         'NormalFinding': ParagraphStyle(
             name='NormalFinding',
             fontSize=12,
-            leading=15,
+            leading=16,
             alignment=TA_LEFT,
-            fontName='Helvetica-Bold',
-            textColor=colors.HexColor('#006600'),  # Dark green for normal findings
-            backColor=colors.HexColor('#EEFFEE'),
-            borderPadding=5,
+            fontName=fonts['bold'],
+            textColor=colors_palette['normal_green'],
+            backColor=colors.HexColor('#F0FDF4'),
+            borderColor=colors_palette['normal_green'],
+            borderWidth=1,
+            borderPadding=10,
+            spaceBefore=12,
             spaceAfter=12
         ),
         'TechnicalData': ParagraphStyle(
             name='TechnicalData',
             fontSize=10,
-            leading=12,
+            leading=13,
             alignment=TA_LEFT,
-            fontName='Helvetica',
-            textColor=colors.HexColor('#555555')
+            fontName=fonts['normal'],
+            textColor=colors_palette['text_medium'],
+            spaceAfter=6
+        ),
+        'Disclaimer': ParagraphStyle(
+            name='Disclaimer',
+            fontSize=10,
+            leading=13,
+            alignment=TA_JUSTIFY,
+            fontName=fonts['italic'],
+            textColor=colors_palette['warning_orange'],
+            backColor=colors.HexColor('#FFF7ED'),
+            borderColor=colors_palette['warning_orange'],
+            borderWidth=1,
+            borderPadding=12,
+            spaceBefore=20,
+            spaceAfter=15
         ),
         'Footer': ParagraphStyle(
-            name='ClinicalFooter',
+            name='Footer',
             fontSize=9,
             leading=11,
             alignment=TA_CENTER,
-            fontName='Helvetica',
-            textColor=colors.HexColor('#666666')
+            fontName=fonts['normal'],
+            textColor=colors_palette['text_light']
+        ),
+        'WatermarkText': ParagraphStyle(
+            name='WatermarkText',
+            fontSize=8,
+            leading=10,
+            alignment=TA_CENTER,
+            fontName=fonts['italic'],
+            textColor=colors_palette['text_light']
         )
     }
 
-def create_clinical_header(consultation: Dict, styles: Dict):
-    """Create professional header for medical report"""
+def create_medical_header(consultation: Dict, styles: Dict):
+    """Create professional medical institution header"""
     elements = []
 
-    # Add institution logo if available
-    try:
-        logo = PlatypusImage("C:/Users/Coshita/Downloads/coursera/ultimocurso/stroke-detection-backend-py/app/utils/hospital_logo.png", width=2.5*inch, height=0.7*inch)
-        elements.append(logo)
-        elements.append(Spacer(1, 20))
-    except:
-        pass
+    # Institution header
+    elements.append(Paragraph("CENTRO MÉDICO DE NEUROIMÁGENES", styles['InstitutionTitle']))
+    elements.append(Paragraph("DEPARTAMENTO DE RADIOLOGÍA - SECCIÓN NEURORRADIOLOGÍA", styles['ReportSubtitle']))
+    elements.append(Spacer(1, 20))
 
-    elements.append(Paragraph("INFORME DE NEUROIMÁGENES", styles['Title']))
-    elements.append(Paragraph("Sistema de Detección de Accidente Cerebrovascular", styles['ClinicalText']))
-    elements.append(Spacer(1, 30))
+    # Report title with emphasis on DWI
+    elements.append(Paragraph("INFORME DE RESONANCIA MAGNÉTICA", styles['ReportTitle']))
+    elements.append(Paragraph("Secuencia de Difusión (DWI) - Evaluación de Isquemia Cerebral Aguda", styles['ReportSubtitle']))
+    elements.append(Spacer(1, 25))
 
-    # Patient data table
+    # Patient information table with professional styling
+    patient_info = consultation.get("patient", {})
     patient_data = [
-        ["PACIENTE:", consultation["patient"].get("name", "No especificado")],
-        ["EDAD/SEXO:", f"{consultation['patient'].get('age', 'N/A')} años / {consultation['patient'].get('gender', 'No especificado')}"],
-        ["FECHA DE ESTUDIO:", datetime.fromisoformat(consultation["date"]).strftime("%d/%m/%Y") if consultation.get("date") else "No especificada"],
-        ["SERVICIO:", consultation.get("service", "Neurología")]
+        ["DATOS DEL PACIENTE", ""],
+        ["Nombre:", patient_info.get("name", "No especificado")],
+        ["Edad:", f"{patient_info.get('age', 'N/A')} años"],
+        ["Sexo:", patient_info.get("gender", "No especificado")],
+        ["", ""],
+        ["DATOS DEL ESTUDIO", ""],
+        ["Fecha del estudio:", datetime.fromisoformat(consultation["date"]).strftime("%d de %B de %Y") if consultation.get("date") else "No especificada"],
+        ["Servicio solicitante:", consultation.get("service", "Neurología")],
+        ["Técnica utilizada:", "Resonancia Magnética - Secuencia DWI"],
+        ["Sistema de análisis:", "IA para Detección de Stroke"]
     ]
 
-    patient_table = Table(patient_data, colWidths=[2*inch, 4*inch])
+    patient_table = Table(patient_data, colWidths=[2.2*inch, 3.8*inch])
     patient_table.setStyle(TableStyle([
-        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+        ('FONTNAME', (0, 0), (-1, -1), 'Times-Roman'),
         ('FONTSIZE', (0, 0), (-1, -1), 11),
-        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTNAME', (0, 0), (0, -1), 'Times-Bold'),
+        ('FONTNAME', (0, 5), (0, 5), 'Times-Bold'),  # "DATOS DEL ESTUDIO" header
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1B4B73')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('BACKGROUND', (0, 5), (-1, 5), colors.HexColor('#1B4B73')),
+        ('TEXTCOLOR', (0, 5), (-1, 5), colors.white),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#F0F5FF')),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D6E0F5')),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BACKGROUND', (0, 1), (-1, 4), colors.HexColor('#F8FAFC')),
+        ('BACKGROUND', (0, 6), (-1, -1), colors.HexColor('#F8FAFC')),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D1D5DB')),
+        ('SPAN', (0, 4), (-1, 4)),  # Empty row for spacing
     ]))
 
     elements.append(patient_table)
@@ -148,241 +305,322 @@ def create_clinical_header(consultation: Dict, styles: Dict):
 
     return elements
 
-def create_imaging_findings(consultation: Dict, styles: Dict):
-    """Create imaging findings section with clinical details"""
+def create_dwi_findings_section(consultation: Dict, styles: Dict):
+    """Create detailed DWI-specific findings section"""
     elements = []
 
-    elements.append(Paragraph("HALLAZGOS DE IMAGEN", styles['Header']))
-    elements.append(Spacer(1, 10))
+    elements.append(Paragraph("HALLAZGOS EN SECUENCIA DE DIFUSIÓN (DWI)", styles['SectionHeader']))
 
     diagnosis = consultation.get("diagnosis", "").lower()
     prob = consultation.get("probability", 0) * 100
 
     if diagnosis == "stroke":
-        finding_style = styles['CriticalFinding']
-        findings_text = f"""
-        <b>HALLAZGO PRINCIPAL:</b> Se identifican alteraciones en la secuencia de difusión 
-        compatibles con isquemia cerebral aguda. La probabilidad calculada por el sistema 
-        es del {prob:.1f}%.
+        # Critical stroke findings
+        finding_text = f"""
+        <b>HALLAZGO CRÍTICO - POSIBLE ISQUEMIA CEREBRAL AGUDA</b><br/><br/>
+        Se identifican áreas de restricción en la difusión altamente sugestivas de isquemia cerebral aguda. 
+        El análisis automatizado mediante inteligencia artificial arroja una probabilidad del <b>{prob:.1f}%</b> 
+        para la presencia de accidente cerebrovascular isquémico.
         """
 
-        elements.append(Paragraph(findings_text, finding_style))
+        elements.append(Paragraph(finding_text, styles['CriticalFinding']))
 
+        # Detailed technical description
+        elements.append(Paragraph("Descripción Técnica:", styles['SubsectionHeader']))
         elements.append(Paragraph("""
-        <b>Características técnicas:</b> Las imágenes muestran restricción en la difusión 
-        con correspondiente disminución en el coeficiente aparente de difusión (ADC), 
-        sin efecto de T2 shine-through evidente. La distribución topográfica sugiere 
-        compromiso vascular en territorio [ESPECIFICAR ARTERIA SI SE CONOCE].
-        """, styles['ClinicalText']))
+        Las imágenes ponderadas en difusión (DWI) muestran áreas de hiperintensidad con correspondiente 
+        hipointensidad en el mapa de coeficiente aparente de difusión (ADC), hallazgo característico de 
+        la restricción de la difusión molecular del agua, típica del edema citotóxico asociado a isquemia 
+        cerebral aguda. No se observa efecto de "T2 shine-through" que pudiera confundir la interpretación.
+        """, styles['BodyText']))
+
+        elements.append(Paragraph("Correlación Anatómica:", styles['SubsectionHeader']))
+        elements.append(Paragraph("""
+        La distribución topográfica de las lesiones sugiere compromiso vascular en territorio arterial 
+        específico. Se recomienda correlación con estudios angiográficos para determinar el vaso afectado 
+        y evaluar opciones terapéuticas de reperfusión.
+        """, styles['BodyText']))
+
     else:
-        finding_style = styles['NormalFinding']
-        findings_text = f"""
-        <b>HALLAZGO PRINCIPAL:</b> No se identifican alteraciones agudas en la secuencia 
-        de difusión. La probabilidad calculada por el sistema es del {prob:.1f}%.
+        # Normal findings
+        finding_text = f"""
+        <b>HALLAZGO DENTRO DE LÍMITES NORMALES</b><br/><br/>
+        Las secuencias de difusión no muestran evidencia de restricción significativa que sugiera 
+        isquemia cerebral aguda. El análisis automatizado mediante inteligencia artificial arroja 
+        una probabilidad del <b>{prob:.1f}%</b> para la presencia de accidente cerebrovascular isquémico.
         """
 
-        elements.append(Paragraph(findings_text, finding_style))
+        elements.append(Paragraph(finding_text, styles['NormalFinding']))
 
+        elements.append(Paragraph("Descripción Técnica:", styles['SubsectionHeader']))
         elements.append(Paragraph("""
-        <b>Características técnicas:</b> Las imágenes muestran señal de difusión 
-        dentro de parámetros normales, sin evidencia de restricción significativa. 
-        El coeficiente aparente de difusión (ADC) se mantiene dentro de rangos 
-        esperados para parénquima cerebral sano.
-        """, styles['ClinicalText']))
-
-    elements.append(Spacer(1, 15))
-
-    # Add clinical correlation
-    elements.append(Paragraph("""
-    <b>Correlación clínica:</b> Los hallazgos deben correlacionarse con la presentación 
-    clínica del paciente y los resultados de otros estudios complementarios. 
-    En casos de discordancia clínico-radiológica, se recomienda reevaluación.
-    """, styles['ClinicalText']))
+        Las imágenes ponderadas en difusión (DWI) y los mapas de coeficiente aparente de difusión (ADC) 
+        no evidencian áreas de restricción significativa. La señal del parénquima cerebral se encuentra 
+        dentro de parámetros normales para los tiempos de evolución evaluados.
+        """, styles['BodyText']))
 
     elements.append(Spacer(1, 20))
-
     return elements
 
-def create_technical_analysis(images: List[Dict], styles: Dict):
-    """Create detailed technical analysis section"""
+def create_technical_parameters_section(images: List[Dict], styles: Dict):
+    """Create detailed technical parameters section"""
     elements = []
 
     if not images:
         return elements
 
-    elements.append(Paragraph("ANÁLISIS TÉCNICO", styles['Header']))
-    elements.append(Paragraph("Resultados detallados por imagen:", styles['Subheader']))
-    elements.append(Spacer(1, 10))
+    elements.append(Paragraph("PARÁMETROS TÉCNICOS Y ANÁLISIS DETALLADO", styles['SectionHeader']))
+
+    # General technical information
+    elements.append(Paragraph("Técnica de Adquisición:", styles['SubsectionHeader']))
+    elements.append(Paragraph("""
+    Secuencias de difusión (DWI) adquiridas con valores b de 0 y 1000 s/mm². Generación automática 
+    de mapas de coeficiente aparente de difusión (ADC). Análisis realizado mediante sistema de 
+    inteligencia artificial especializado en detección de patrones de isquemia cerebral aguda.
+    """, styles['BodyText']))
+
+    # Analysis per image
+    elements.append(Paragraph("Análisis por Imagen:", styles['SubsectionHeader']))
 
     for idx, img in enumerate(images, 1):
-        elements.append(Paragraph(f"<b>Imagen {idx}:</b> {img.get('filename', 'Imagen no identificada')}", styles['Subheader']))
-
-        img_data = [
-            ["Parámetro", "Valor"],
-            ["Fecha de procesamiento", img.get("created_at", "No especificada")],
-            ["Hallazgo principal", img.get("diagnosis", "No determinado")],
-            ["Probabilidad calculada", f"{img.get('probability', 0)*100:.1f}%"],
-            ["Confianza del modelo", f"{img.get('confidence', 0)*100:.1f}%"],
-            ["Técnica de adquisición", img.get("technique", "DWI estándar")]
+        image_analysis_data = [
+            ["Parámetro", "Valor", "Interpretación"],
+            ["Archivo", img.get('filename', f'Imagen_{idx}'), ""],
+            ["Probabilidad de stroke", f"{img.get('probability', 0)*100:.2f}%",
+             "Alta" if img.get('probability', 0) >= 0.7 else "Moderada" if img.get('probability', 0) >= 0.5 else "Baja"],
+            ["Confianza del modelo", f"{img.get('confidence', 0)*100:.2f}%",
+             "Óptima" if img.get('confidence', 0) >= 0.8 else "Aceptable" if img.get('confidence', 0) >= 0.6 else "Limitada"],
+            ["Diagnóstico automatizado", img.get('diagnosis', 'No determinado'), ""],
+            ["Fecha de procesamiento", img.get("created_at", "No especificada"), ""]
         ]
 
-        img_table = Table(img_data, colWidths=[2.5*inch, 3.5*inch])
+        img_table = Table(image_analysis_data, colWidths=[2*inch, 2*inch, 2*inch])
         img_table.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTNAME', (0, 0), (-1, -1), 'Times-Roman'),
             ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Times-Bold'),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2E5984')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#003366')),
-            ('TEXTCOLOR', (0, 0), (0, 0), colors.white),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F5F9FF')),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D6E0F5')),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F8FAFC')),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D1D5DB')),
         ]))
 
+        elements.append(Paragraph(f"<b>Imagen {idx}:</b>", styles['SubsectionHeader']))
         elements.append(img_table)
         elements.append(Spacer(1, 15))
 
     return elements
 
-def create_clinical_recommendations(consultation: Dict, styles: Dict):
-    """Create clinical recommendations for medical professionals"""
+def create_clinical_recommendations_section(consultation: Dict, styles: Dict):
+    """Create comprehensive clinical recommendations"""
     elements = []
 
-    elements.append(Paragraph("EVALUACIÓN CLÍNICA", styles['Header']))
-    elements.append(Spacer(1, 10))
+    elements.append(Paragraph("RECOMENDACIONES CLÍNICAS", styles['SectionHeader']))
 
     diagnosis = consultation.get("diagnosis", "").lower()
-    prob = consultation.get("probability", 0) * 100
+
+    elements.append(Paragraph("Correlación Clínica Requerida:", styles['SubsectionHeader']))
 
     if diagnosis == "stroke":
         elements.append(Paragraph("""
-        <b>Consideraciones para el equipo tratante:</b> Los hallazgos de imagen son 
-        compatibles con evento cerebrovascular isquémico agudo. Se sugiere:
-        """, styles['ClinicalText']))
+        Ante la identificación de hallazgos compatibles con isquemia cerebral aguda, se requiere 
+        <b>evaluación neurológica urgente</b> para determinar:
+        """, styles['BodyText']))
 
         recommendations = [
-            "Confirmar ventana terapéutica para posibles intervenciones de reperfusión",
-            "Evaluar NIHSS y criterios para trombólisis/trombectomía",
-            "Monitorización neurológica estrecha",
-            "Control estricto de parámetros hemodinámicos",
-            "Iniciar medidas neuroprotectoras según protocolo institucional",
-            "Considerar estudios etiológicos (ECG, eco cardíaco, Doppler vascular)"
+            "Tiempo de inicio de síntomas neurológicos (ventana terapéutica)",
+            "Escala NIHSS para cuantificar severidad del déficit neurológico",
+            "Criterios de inclusión/exclusión para terapias de reperfusión",
+            "Evaluación de contraindicaciones para trombólisis intravenosa",
+            "Consideración de trombectomía mecánica según criterios institucionales",
+            "Monitorización neurológica continua en unidad especializada"
         ]
+
+        for i, rec in enumerate(recommendations, 1):
+            elements.append(Paragraph(f"{i}. {rec}", styles['BodyText']))
+
+        elements.append(Paragraph("Estudios Complementarios Sugeridos:", styles['SubsectionHeader']))
+        elements.append(Paragraph("""
+        • Angio-RM o angio-TC para evaluación vascular<br/>
+        • Ecocardiograma y Holter si se sospecha origen cardioembólico<br/>
+        • Doppler carotídeo para evaluación de estenosis<br/>
+        • Perfil de coagulación completo<br/>
+        • Estudios metabólicos (glucosa, electrolitos, función renal)
+        """, styles['BodyText']))
+
     else:
         elements.append(Paragraph("""
-        <b>Consideraciones para el equipo tratante:</b> Aunque no se identifican 
-        hallazgos agudos en la secuencia de difusión, se recomienda:
-        """, styles['ClinicalText']))
+        Aunque las imágenes de difusión no muestran evidencia de isquemia aguda, se recomienda:
+        """, styles['BodyText']))
 
         recommendations = [
-            "Correlación con cuadro clínico y reevaluación si persiste sospecha",
-            "Considerar diagnóstico diferencial según presentación",
-            "Evaluar necesidad de estudios complementarios",
-            "Seguimiento según evolución clínica",
-            "Implementar medidas preventivas según factores de riesgo"
+            "Correlacionar con sintomatología clínica del paciente",
+            "Considerar diagnósticos diferenciales según presentación",
+            "Evaluar factores de riesgo cardiovascular",
+            "Seguimiento clínico según evolución sintomatológica",
+            "Considerar repetir estudio si hay alta sospecha clínica"
         ]
 
-    # Add recommendations as bullet points
-    for rec in recommendations:
-        elements.append(Paragraph(f"• {rec}", styles['ClinicalText']))
+        for i, rec in enumerate(recommendations, 1):
+            elements.append(Paragraph(f"{i}. {rec}", styles['BodyText']))
 
-    elements.append(Spacer(1, 15))
+    elements.append(Spacer(1, 20))
+    return elements
 
-    # Add technical note
-    elements.append(Paragraph("""
-    <b>Nota técnica:</b> Este reporte ha sido generado mediante sistema de inteligencia 
-    artificial especializado en neuroimágenes. La interpretación final y las decisiones 
-    terapéuticas corresponden al médico tratante, quien debe considerar el contexto 
-    clínico integral del paciente.
-    """, styles['TechnicalData']))
+def create_medical_disclaimer(styles: Dict):
+    """Create comprehensive medical and AI disclaimer"""
+    elements = []
 
+    elements.append(Paragraph("LIMITACIONES Y CONSIDERACIONES IMPORTANTES", styles['SectionHeader']))
+
+    disclaimer_text = """
+    <b>ADVERTENCIA MÉDICA IMPORTANTE:</b><br/><br/>
+    
+    Este reporte ha sido generado mediante un sistema de inteligencia artificial especializado en el 
+    análisis de imágenes de resonancia magnética con secuencia de difusión (DWI). 
+    
+    <b>LIMITACIONES DEL SISTEMA AUTOMATIZADO:</b><br/>
+    • El diagnóstico automatizado NO sustituye el criterio clínico del médico especialista<br/>
+    • Los resultados deben ser siempre correlacionados con la presentación clínica del paciente<br/>
+    • El sistema puede presentar falsos positivos o negativos<br/>
+    • La interpretación final y las decisiones terapéuticas son responsabilidad exclusiva del médico tratante<br/>
+    • Se requiere validación por neurorradiólogo certificado para confirmación diagnóstica<br/><br/>
+    
+    <b>RESPONSABILIDAD MÉDICA:</b><br/>
+    El médico tratante debe considerar este reporte como una herramienta de apoyo diagnóstico 
+    complementaria, manteniendo siempre el juicio clínico independiente y la evaluación integral 
+    del paciente como elementos primordiales para la toma de decisiones terapéuticas.
+    """
+
+    elements.append(Paragraph(disclaimer_text, styles['Disclaimer']))
     elements.append(Spacer(1, 20))
 
     return elements
 
-def create_clinical_footer(canvas, doc):
-    """Add professional footer to each page"""
+def create_professional_footer(canvas, doc):
+    """Add professional footer with validation information"""
     canvas.saveState()
-    canvas.setFont('Helvetica', 9)
-    canvas.setFillColor(colors.HexColor('#666666'))
 
-    # Footer text
+    # Footer background
+    canvas.setFillColor(colors.HexColor('#F8FAFC'))
+    canvas.rect(0, 0, A4[0], 3*cm, fill=1, stroke=0)
+
+    # Main footer text
+    canvas.setFont('Times-Roman', 9)
+    canvas.setFillColor(colors.HexColor('#4B5563'))
+
+    # Institution and system info
     canvas.drawCentredString(
-        A4[0]/2,
-        2*cm,
-        f"Generado por Sistema de Análisis de Neuroimágenes - {datetime.now().strftime('%d/%m/%Y %H:%M')} - Página {canvas.getPageNumber()}"
+        A4[0]/2, 2.5*cm,
+        f"Sistema de Análisis de Neuroimágenes por IA - Generado el {datetime.now().strftime('%d/%m/%Y a las %H:%M')} hrs"
     )
 
-    # Confidentiality notice
-    canvas.setFont('Helvetica-Oblique', 8)
-    canvas.drawCentredString(A4[0]/2, 1.7*cm, "Documento de uso exclusivo para personal médico")
+    # Page number
+    canvas.drawCentredString(A4[0]/2, 2.2*cm, f"Página {canvas.getPageNumber()}")
+
+    # Confidentiality and validation notices
+    canvas.setFont('Times-Italic', 8)
+    canvas.setFillColor(colors.HexColor('#6B7280'))
+    canvas.drawCentredString(A4[0]/2, 1.8*cm, "DOCUMENTO CONFIDENCIAL - USO EXCLUSIVO PARA PERSONAL MÉDICO AUTORIZADO")
+    canvas.drawCentredString(A4[0]/2, 1.5*cm, "Requiere validación por especialista en neurorradiología - No sustituye criterio médico")
+
+    # Validation box
+    canvas.setStrokeColor(colors.HexColor('#D1D5DB'))
+    canvas.setLineWidth(0.5)
+    canvas.rect(A4[0] - 4*cm, 0.5*cm, 3.5*cm, 1*cm)
+    canvas.setFont('Times-Roman', 7)
+    canvas.drawString(A4[0] - 3.8*cm, 1.2*cm, "VALIDACIÓN MÉDICA:")
+    canvas.drawString(A4[0] - 3.8*cm, 1.0*cm, "Dr./Dra.: ________________")
+    canvas.drawString(A4[0] - 3.8*cm, 0.8*cm, "Firma: ___________________")
+    canvas.drawString(A4[0] - 3.8*cm, 0.6*cm, "Fecha: ___________________")
+
     canvas.restoreState()
 
 def generate_clinical_pdf_report(consultation: Dict, images: List[Dict]) -> bytes:
     """
-    Generate a professional clinical PDF report for medical professionals with:
-    - Clinical header with patient data
-    - Imaging findings with technical details
-    - Detailed image analysis
-    - Clinical recommendations
-    - Professional formatting
+    Generate a professional clinical PDF report specifically designed for DWI stroke analysis
+    with medical-grade formatting, proper disclaimers, and comprehensive technical details.
     """
     buffer = BytesIO()
 
     try:
-        # Create document with clinical formatting
+        # Create document with professional medical formatting
         doc = SimpleDocTemplate(
             buffer,
             pagesize=A4,
-            rightMargin=1.5*cm,
-            leftMargin=1.5*cm,
-            topMargin=2*cm,
-            bottomMargin=2.5*cm,
-            title=f"Reporte Clínico - {consultation.get('patient', {}).get('name', '')}",
-            author="Sistema de Análisis de Neuroimágenes"
+            rightMargin=2*cm,
+            leftMargin=2*cm,
+            topMargin=2.5*cm,
+            bottomMargin=4*cm,  # Extra space for footer
+            title=f"Reporte DWI - {consultation.get('patient', {}).get('name', 'Paciente')}",
+            author="Sistema de Análisis de Neuroimágenes por IA",
+            subject="Informe de Resonancia Magnética - Secuencia de Difusión",
+            creator="Sistema Médico de IA para Detección de Stroke"
         )
 
-        # Create clinical styles
+        # Create professional styles
         styles = create_clinical_styles()
 
-        # Build report content
+        # Build comprehensive report content
         story = []
 
-        # Add clinical header
-        story.extend(create_clinical_header(consultation, styles))
+        # Medical institution header
+        story.extend(create_medical_header(consultation, styles))
 
-        # Add imaging findings
-        story.extend(create_imaging_findings(consultation, styles))
+        # DWI-specific findings section
+        story.extend(create_dwi_findings_section(consultation, styles))
 
-        # Add technical analysis
-        story.extend(create_technical_analysis(images, styles))
+        # Technical parameters and analysis
+        story.extend(create_technical_parameters_section(images, styles))
 
-        # Add clinical recommendations
-        story.extend(create_clinical_recommendations(consultation, styles))
+        # Clinical recommendations
+        story.extend(create_clinical_recommendations_section(consultation, styles))
 
-        # Add final notation
-        story.append(Paragraph("***", ParagraphStyle(name='Divider', fontSize=14, alignment=TA_CENTER)))
-        story.append(Spacer(1, 15))
-        # Build document with footer
+        # Medical disclaimers and limitations
+        story.extend(create_medical_disclaimer(styles))
+
+        # Final medical signature section
+        story.append(Spacer(1, 30))
+        story.append(Paragraph("___" * 25, styles['Footer']))
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Este reporte requiere validación y firma del médico especialista",
+                               styles['Footer']))
+
+        # Build document with professional footer
         doc.build(
             story,
-            onFirstPage=create_clinical_footer,
-            onLaterPages=create_clinical_footer
+            onFirstPage=create_professional_footer,
+            onLaterPages=create_professional_footer
         )
 
         buffer.seek(0)
         return buffer.getvalue()
 
     except Exception as e:
-        logger.error(f"Error generating clinical PDF: {str(e)}", exc_info=True)
-        # Fallback to simple error report
+        logger.error(f"Error generating professional clinical PDF: {str(e)}", exc_info=True)
+
+        # Generate error report with professional formatting
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4)
         styles = create_clinical_styles()
-        story = [
-            Paragraph("Error en Generación de Reporte", styles['Header']),
-            Paragraph(f"Se produjo un error técnico al generar el PDF: {str(e)}", styles['ClinicalText'])
+
+        error_story = [
+            Paragraph("ERROR EN LA GENERACIÓN DEL REPORTE MÉDICO", styles['SectionHeader']),
+            Spacer(1, 20),
+            Paragraph(f"Se ha producido un error técnico durante la generación del informe médico:",
+                      styles['BodyText']),
+            Paragraph(f"<b>Detalles del error:</b> {str(e)}", styles['TechnicalData']),
+            Spacer(1, 20),
+            Paragraph("""
+            Por favor, contacte al administrador del sistema o intente generar el reporte nuevamente. 
+            Si el problema persiste, proceda con la evaluación manual de las imágenes por parte 
+            del especialista en neurorradiología.
+            """, styles['BodyText'])
         ]
-        doc.build(story)
+
+        doc.build(error_story)
         buffer.seek(0)
         return buffer.getvalue()
