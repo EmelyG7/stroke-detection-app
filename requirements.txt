@@ -7,3 +7,4 @@ tensorflow==2.18.0
 pillow==10.0.1
 reportlab==4.0.6
 opencv-python
+bcrypt>=4.0.0
