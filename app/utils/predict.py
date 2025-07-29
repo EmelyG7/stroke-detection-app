@@ -5,7 +5,6 @@ import numpy as np
 
 from app.utils.preprocess import preprocess_medical_image
 
-
 class F1Score(tf.keras.metrics.Metric):
     def __init__(self, name='f1_score', threshold=0.5, **kwargs):
         super(F1Score, self).__init__(name=name, **kwargs)
@@ -39,7 +38,7 @@ def focal_loss(gamma=3.0, alpha=0.6):
         return tf.reduce_mean(loss)
     return focal_loss_fn
 
-# Configura los objetos personalizados exactamente como durante el entrenamiento
+# Configura los objetos personalizados
 custom_objects = {
     'F1Score': F1Score,
     'focal_loss_fn': focal_loss(gamma=3.0, alpha=0.6)
@@ -47,26 +46,21 @@ custom_objects = {
 
 def load_stroke_model(model_path):
     try:
-        # Limpia la sesión de TensorFlow antes de cargar
         tf.keras.backend.clear_session()
-
-        # Carga el modelo con los objetos personalizados
         model = load_model(model_path, custom_objects=custom_objects, compile=True)
-
-        # Forzar la carga de los pesos (a veces necesario)
         model.load_weights(model_path)
-
         return model
     except Exception as e:
         raise ValueError(f"Error loading model: {str(e)}")
 
-# Ruta al modelo (ajusta según tu estructura de directorios)
+# Umbral óptimo determinado por tu Fold 5
+OPTIMAL_THRESHOLD = 0.4469
+
 MODEL_PATH = "models/best_fold_5_el_mejor_de_los_5_folds.h5"
 
-# Carga el modelo al iniciar (puedes mover esto a donde lo necesites)
 try:
     model = load_stroke_model(MODEL_PATH)
-    print("Model loaded successfully!")
+    print(f"Model loaded successfully! Using optimal threshold: {OPTIMAL_THRESHOLD}")
 except Exception as e:
     print(f"Failed to load model: {e}")
     model = None
@@ -76,24 +70,30 @@ async def predict_stroke(image_content: bytes):
         raise Exception("Model not loaded")
 
     try:
-        # Preprocesamiento (ajusta según tu implementación)
         processed_image = preprocess_medical_image(image_content)
-
-        # Asegúrate de que las dimensiones son correctas para tu modelo
         processed_image = np.expand_dims(processed_image, axis=0)
 
-        # Predicción
+        # Obtener probabilidad cruda del modelo
         prediction = model.predict(processed_image)
         probability = float(prediction[0][0])
 
-        # Resultado
-        diagnosis = "Stroke" if probability >= 0.5 else "Normal"
-        confidence = probability if diagnosis == "Stroke" else 1 - probability
+        # Aplicar umbral óptimo (44.69%)
+        diagnosis = "Stroke" if probability >= OPTIMAL_THRESHOLD else "Normal"
+
+        # Calcular confianza relativa al umbral
+        if diagnosis == "Stroke":
+            confidence = (probability - OPTIMAL_THRESHOLD) / (1 - OPTIMAL_THRESHOLD)
+        else:
+            confidence = (OPTIMAL_THRESHOLD - probability) / OPTIMAL_THRESHOLD
+
+        # Asegurar que la confianza esté en [0, 1]
+        confidence = max(0.0, min(1.0, confidence))
 
         return {
             "diagnosis": diagnosis,
             "confidence": confidence,
-            "probability": probability
+            "probability": probability,
+            "threshold_used": OPTIMAL_THRESHOLD
         }
     except Exception as e:
         raise Exception(f"Prediction error: {str(e)}")
